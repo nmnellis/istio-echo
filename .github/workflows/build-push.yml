@@ -1,7 +1,6 @@
-#on: [push, pull_request]
 on:
   push:
-    branches: ['build-test']
+    branches: ['master']
 name: Build
 jobs:
   build-push:
