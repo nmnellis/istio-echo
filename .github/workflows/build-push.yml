@@ -21,10 +21,13 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v2
     - name: Build code
-      run: make istio-echo
-    - name: Build push docker image
-      uses: docker/build-push-action@v2
-      with:
-        file: ./_output/istio-echo/Dockerfile.app
-        push: true
-        tags: latest
+      run: |
+        make echo-docker
+        echo ${{ secrets.GITHUB_TOKEN }} | docker login https://docker.pkg.github.com -u $GITHUB_ACTOR --password-stdin
+        docker push ghcr.io/nmnellis/istio-echo:latest
+#    - name: Build push docker image
+#      uses: docker/build-push-action@v1
+#      with:
+#        file: ./_output/istio-echo/Dockerfile.app
+#        push: true
+#        tags: latest
