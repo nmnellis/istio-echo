@@ -25,6 +25,6 @@ jobs:
     - name: Build push docker image
       uses: docker/build-push-action@v2
       with:
-        context: _output/istio-echo/Dockerfile.app
+        file: ./_output/istio-echo/Dockerfile.app
         push: true
         tags: latest
