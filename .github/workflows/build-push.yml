@@ -28,7 +28,6 @@ jobs:
         context: ./_output/istio-echo/Dockerfile.app
         push: true
         tags: |
-          type=schedule
           type=ref,event=branch
           type=ref,event=pr
           type=semver,pattern={{version}}
