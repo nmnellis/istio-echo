@@ -14,6 +14,22 @@ jobs:
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
+    - name: Docker meta
+      id: meta
+      uses: crazy-max/ghaction-docker-meta@v2
+      with:
+        # list of Docker images to use as base name for tags
+        images: |
+          nmnellis/istio-echo
+          ghcr.io/nmnellis/istio-echo
+        # generate Docker tags based on the following events/attributes
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha
     - name: Install Go
       uses: actions/setup-go@v2
       with:
@@ -27,11 +43,5 @@ jobs:
       with:
         context: ./_output/istio-echo/Dockerfile.app
         push: true
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
-          type=sha
+        tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
