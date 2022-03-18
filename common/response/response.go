@@ -32,7 +32,6 @@ var (
 type Field string
 
 const (
-	NameField           Field = "App Name"
 	RequestIDField      Field = "X-Request-Id"
 	ServiceVersionField Field = "ServiceVersion"
 	ServicePortField    Field = "ServicePort"

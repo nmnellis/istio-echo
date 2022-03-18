@@ -15,10 +15,13 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -27,15 +30,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opencensus.io/stats/view"
 
+	"istio.io/istio/pilot/pkg/util/network"
+	"istio.io/istio/pkg/config/protocol"
 	"github.com/nmnellis/istio-echo/common"
 	"github.com/nmnellis/istio-echo/server/endpoint"
-	"istio.io/istio/pkg/config/protocol"
 	"istio.io/pkg/log"
 )
 
 // Config for an echo server Instance.
 type Config struct {
-	Name                  string
 	Ports                 common.PortList
 	BindIPPortsMap        map[int]struct{}
 	BindLocalhostPortsMap map[int]struct{}
@@ -47,6 +50,23 @@ type Config struct {
 	Cluster               string
 	Dialer                common.Dialer
 	IstioVersion          string
+	DisableALPN           bool
+}
+
+func (c Config) String() string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Ports:                 %v\n", c.Ports))
+	b.WriteString(fmt.Sprintf("BindIPPortsMap:        %v\n", c.BindIPPortsMap))
+	b.WriteString(fmt.Sprintf("BindLocalhostPortsMap: %v\n", c.BindLocalhostPortsMap))
+	b.WriteString(fmt.Sprintf("Metrics:               %v\n", c.Metrics))
+	b.WriteString(fmt.Sprintf("TLSCert:               %v\n", c.TLSCert))
+	b.WriteString(fmt.Sprintf("TLSKey:                %v\n", c.TLSKey))
+	b.WriteString(fmt.Sprintf("Version:               %v\n", c.Version))
+	b.WriteString(fmt.Sprintf("UDSServer:             %v\n", c.UDSServer))
+	b.WriteString(fmt.Sprintf("Cluster:               %v\n", c.Cluster))
+	b.WriteString(fmt.Sprintf("IstioVersion:          %v\n", c.IstioVersion))
+
+	return b.String()
 }
 
 var _ io.Closer = &Instance{}
@@ -62,6 +82,7 @@ type Instance struct {
 
 // New creates a new server instance.
 func New(config Config) *Instance {
+	log.Infof("Creating Server with config:\n%s", config)
 	config.Dialer = config.Dialer.FillInDefaults()
 
 	return &Instance{
@@ -85,16 +106,23 @@ func (s *Instance) Start() (err error) {
 		go s.startMetricsServer()
 	}
 	s.endpoints = make([]endpoint.Instance, 0)
+
 	for _, p := range s.Ports {
-		ep, err := s.newEndpoint(p, "")
+		ip, err := s.getListenerIP(p)
 		if err != nil {
 			return err
 		}
-		s.endpoints = append(s.endpoints, ep)
+		for _, ip := range getBindAddresses(ip) {
+			ep, err := s.newEndpoint(p, ip, "")
+			if err != nil {
+				return err
+			}
+			s.endpoints = append(s.endpoints, ep)
+		}
 	}
 
 	if len(s.UDSServer) > 0 {
-		ep, err := s.newEndpoint(nil, s.UDSServer)
+		ep, err := s.newEndpoint(nil, "", s.UDSServer)
 		if err != nil {
 			return err
 		}
@@ -102,6 +130,40 @@ func (s *Instance) Start() (err error) {
 	}
 
 	return s.waitUntilReady()
+}
+
+func getBindAddresses(ip string) []string {
+	if ip != "localhost" {
+		return []string{ip}
+	}
+	// Binding to "localhost" will only bind to a single address (v4 or v6). We want both, so we need
+	// to be explicit
+	v4, v6 := false, false
+	// Obtain all the IPs from the node
+	ipAddrs, ok := network.GetPrivateIPs(context.Background())
+	if !ok {
+		return []string{ip}
+	}
+	for _, ip := range ipAddrs {
+		addr := net.ParseIP(ip)
+		if addr == nil {
+			// Should not happen
+			continue
+		}
+		if addr.To4() != nil {
+			v4 = true
+		} else {
+			v6 = true
+		}
+	}
+	addrs := []string{}
+	if v4 {
+		addrs = append(addrs, "127.0.0.1")
+	}
+	if v6 {
+		addrs = append(addrs, "::1")
+	}
+	return addrs
 }
 
 // Close implements the application.Application interface
@@ -132,11 +194,7 @@ func (s *Instance) getListenerIP(port *common.Port) (string, error) {
 	return "", fmt.Errorf("--bind-ip set but INSTANCE_IP undefined")
 }
 
-func (s *Instance) newEndpoint(port *common.Port, udsServer string) (endpoint.Instance, error) {
-	ip, err := s.getListenerIP(port)
-	if err != nil {
-		return nil, err
-	}
+func (s *Instance) newEndpoint(port *common.Port, listenerIP string, udsServer string) (endpoint.Instance, error) {
 	return endpoint.New(endpoint.Config{
 		Port:          port,
 		UDSServer:     udsServer,
@@ -146,9 +204,9 @@ func (s *Instance) newEndpoint(port *common.Port, udsServer string) (endpoint.In
 		TLSCert:       s.TLSCert,
 		TLSKey:        s.TLSKey,
 		Dialer:        s.Dialer,
-		ListenerIP:    ip,
+		ListenerIP:    listenerIP,
+		DisableALPN:   s.DisableALPN,
 		IstioVersion:  s.IstioVersion,
-		Name:          s.Name,
 	})
 }
 

@@ -23,10 +23,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,6 +36,10 @@ import (
 	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials/xds"
+	xdsresolver "google.golang.org/grpc/xds"
+	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/nmnellis/istio-echo/common"
 	"github.com/nmnellis/istio-echo/common/scheme"
@@ -42,13 +47,14 @@ import (
 )
 
 type request struct {
-	URL         string
-	Header      http.Header
-	RequestID   int
-	Message     string
-	Timeout     time.Duration
-	ServerFirst bool
-	Method      string
+	URL              string
+	Header           http.Header
+	RequestID        int
+	Message          string
+	ExpectedResponse *wrappers.StringValue
+	Timeout          time.Duration
+	ServerFirst      bool
+	Method           string
 }
 
 type protocol interface {
@@ -69,10 +75,13 @@ func newProtocol(cfg Config) (protocol, error) {
 		}
 	}
 
+	// Do not use url.Parse() as it will fail to parse paths with invalid encoding that we intentionally used in the test.
 	rawURL := cfg.Request.Url
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed parsing request URL %s: %v", cfg.Request.Url, err)
+	var urlScheme string
+	if i := strings.IndexByte(rawURL, ':'); i > 0 {
+		urlScheme = strings.ToLower(rawURL[0:i])
+	} else {
+		return nil, fmt.Errorf("missing protocol scheme in the request URL: %s", rawURL)
 	}
 
 	timeout := common.GetTimeout(cfg.Request)
@@ -80,12 +89,12 @@ func newProtocol(cfg Config) (protocol, error) {
 
 	var getClientCertificate func(info *tls.CertificateRequestInfo) (*tls.Certificate, error)
 	if cfg.Request.KeyFile != "" && cfg.Request.CertFile != "" {
-		certData, err := ioutil.ReadFile(cfg.Request.CertFile)
+		certData, err := os.ReadFile(cfg.Request.CertFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load client certificate: %v", err)
 		}
 		cfg.Request.Cert = string(certData)
-		keyData, err := ioutil.ReadFile(cfg.Request.KeyFile)
+		keyData, err := os.ReadFile(cfg.Request.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load client certificate key: %v", err)
 		}
@@ -130,7 +139,7 @@ func newProtocol(cfg Config) (protocol, error) {
 		ServerName:           cfg.Request.ServerName,
 	}
 	if cfg.Request.CaCertFile != "" {
-		certData, err := ioutil.ReadFile(cfg.Request.CaCertFile)
+		certData, err := os.ReadFile(cfg.Request.CaCertFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load client certificate: %v", err)
 		}
@@ -153,7 +162,7 @@ func newProtocol(cfg Config) (protocol, error) {
 	if cfg.Request.FollowRedirects {
 		redirectFn = nil
 	}
-	switch scheme.Instance(u.Scheme) {
+	switch s := scheme.Instance(urlScheme); s {
 	case scheme.HTTP, scheme.HTTPS:
 		if cfg.Request.Alpn == nil {
 			tlsConfig.NextProtos = []string{"http/1.1"}
@@ -174,14 +183,21 @@ func newProtocol(cfg Config) (protocol, error) {
 			},
 			do: cfg.Dialer.HTTP,
 		}
-		if cfg.Request.Http3 && scheme.Instance(u.Scheme) == scheme.HTTP {
+		if len(cfg.Proxy) > 0 {
+			proxyURL, err := url.Parse(cfg.Proxy)
+			if err != nil {
+				return nil, err
+			}
+			proto.client.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyURL)
+		}
+		if cfg.Request.Http3 && scheme.Instance(urlScheme) == scheme.HTTP {
 			return nil, fmt.Errorf("http3 requires HTTPS")
 		} else if cfg.Request.Http3 {
 			proto.client.Transport = &http3.RoundTripper{
 				TLSClientConfig: tlsConfig,
 				QuicConfig:      &quic.Config{},
 			}
-		} else if cfg.Request.Http2 && scheme.Instance(u.Scheme) == scheme.HTTPS {
+		} else if cfg.Request.Http2 && scheme.Instance(urlScheme) == scheme.HTTPS {
 			if cfg.Request.Alpn == nil {
 				tlsConfig.NextProtos = []string{"h2"}
 			}
@@ -204,26 +220,44 @@ func newProtocol(cfg Config) (protocol, error) {
 			}
 		}
 		return proto, nil
-	case scheme.GRPC:
+	case scheme.GRPC, scheme.XDS:
+		// NOTE: XDS load-balancing happens per-ForwardEchoRequest since we create a new client each time
+
+		var opts []grpc.DialOption
 		// grpc-go sets incorrect authority header
-		authority := headers.Get(hostHeader)
 
 		// transport security
-		security := grpc.WithInsecure()
+		security := grpc.WithTransportCredentials(insecure.NewCredentials())
+		if s == scheme.XDS {
+			creds, err := xds.NewClientCredentials(xds.ClientOptions{FallbackCreds: insecure.NewCredentials()})
+			if err != nil {
+				return nil, err
+			}
+			security = grpc.WithTransportCredentials(creds)
+			if len(cfg.XDSTestBootstrap) > 0 {
+				resolver, err := xdsresolver.NewXDSResolverWithConfigForTesting(cfg.XDSTestBootstrap)
+				if err != nil {
+					return nil, err
+				}
+				opts = append(opts, grpc.WithResolvers(resolver))
+			}
+		}
+
 		if getClientCertificate != nil {
 			security = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 		}
 
-		// Strip off the scheme from the address.
-		address := rawURL[len(u.Scheme+"://"):]
+		// Strip off the scheme from the address (for regular gRPC).
+		address := rawURL
+		if urlScheme == string(scheme.GRPC) {
+			address = rawURL[len(urlScheme+"://"):]
+		}
 
 		// Connect to the GRPC server.
 		ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
 		defer cancel()
-		grpcConn, err := cfg.Dialer.GRPC(ctx,
-			address,
-			security,
-			grpc.WithAuthority(authority))
+		opts = append(opts, security, grpc.WithAuthority(headers.Get(hostHeader)))
+		grpcConn, err := cfg.Dialer.GRPC(ctx, address, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -248,7 +282,7 @@ func newProtocol(cfg Config) (protocol, error) {
 				dialer := net.Dialer{
 					Timeout: timeout,
 				}
-				address := rawURL[len(u.Scheme+"://"):]
+				address := rawURL[len(urlScheme+"://"):]
 
 				ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
 				defer cancel()
@@ -259,7 +293,22 @@ func newProtocol(cfg Config) (protocol, error) {
 				return tls.Dial("tcp", address, tlsConfig)
 			},
 		}, nil
+	case scheme.TLS:
+		return &tlsProtocol{
+			conn: func() (*tls.Conn, error) {
+				dialer := net.Dialer{
+					Timeout: timeout,
+				}
+				address := rawURL[len(urlScheme+"://"):]
+
+				con, err := tls.DialWithDialer(&dialer, "tcp", address, tlsConfig)
+				if err != nil {
+					return nil, err
+				}
+				return con, nil
+			},
+		}, nil
 	}
 
-	return nil, fmt.Errorf("unrecognized protocol %q", u.String())
+	return nil, fmt.Errorf("unrecognized protocol %q", urlScheme)
 }

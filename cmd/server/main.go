@@ -22,6 +22,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	// To install the xds resolvers and balancers.
+	_ "google.golang.org/grpc/xds"
+
 	"github.com/nmnellis/istio-echo/common"
 	"github.com/nmnellis/istio-echo/server"
 	"istio.io/istio/pkg/cmd"
@@ -37,14 +40,15 @@ var (
 	instanceIPPorts  []int
 	localhostIPPorts []int
 	serverFirstPorts []int
+	xdsGRPCServers   []int
 	metricsPort      int
 	uds              string
 	version          string
 	cluster          string
-	name             string
 	crt              string
 	key              string
 	istioVersion     string
+	disableALPN      bool
 
 	loggingOptions = log.DefaultOptions()
 
@@ -64,6 +68,10 @@ var (
 			for _, p := range serverFirstPorts {
 				serverFirstByPort[p] = true
 			}
+			xdsGRPCByPort := map[int]bool{}
+			for _, p := range xdsGRPCServers {
+				xdsGRPCByPort[p] = true
+			}
 			portIndex := 0
 			for i, p := range httpPorts {
 				ports[portIndex] = &common.Port{
@@ -82,6 +90,7 @@ var (
 					Port:        p,
 					TLS:         tlsByPort[p],
 					ServerFirst: serverFirstByPort[p],
+					XDSServer:   xdsGRPCByPort[p],
 				}
 				portIndex++
 			}
@@ -115,7 +124,7 @@ var (
 				Cluster:               cluster,
 				IstioVersion:          istioVersion,
 				UDSServer:             uds,
-				Name:                  name,
+				DisableALPN:           disableALPN,
 			})
 
 			if err := s.Start(); err != nil {
@@ -149,14 +158,15 @@ func init() {
 	rootCmd.PersistentFlags().IntSliceVar(&instanceIPPorts, "bind-ip", []int{}, "Ports that are bound to INSTANCE_IP rather than wildcard IP.")
 	rootCmd.PersistentFlags().IntSliceVar(&localhostIPPorts, "bind-localhost", []int{}, "Ports that are bound to localhost rather than wildcard IP.")
 	rootCmd.PersistentFlags().IntSliceVar(&serverFirstPorts, "server-first", []int{}, "Ports that are server first. These must be defined as tcp.")
+	rootCmd.PersistentFlags().IntSliceVar(&xdsGRPCServers, "xds-grpc-server", []int{}, "Ports that should rely on XDS configuration to serve.")
 	rootCmd.PersistentFlags().IntVar(&metricsPort, "metrics", 0, "Metrics port")
 	rootCmd.PersistentFlags().StringVar(&uds, "uds", "", "HTTP server on unix domain socket")
 	rootCmd.PersistentFlags().StringVar(&version, "version", "", "Version string")
 	rootCmd.PersistentFlags().StringVar(&cluster, "cluster", "", "Cluster where this server is deployed")
-	rootCmd.PersistentFlags().StringVar(&name, "name", "", "Application name to identify it")
 	rootCmd.PersistentFlags().StringVar(&crt, "crt", "", "gRPC TLS server-side certificate")
 	rootCmd.PersistentFlags().StringVar(&key, "key", "", "gRPC TLS server-side key")
 	rootCmd.PersistentFlags().StringVar(&istioVersion, "istio-version", "", "Istio sidecar version")
+	rootCmd.PersistentFlags().BoolVar(&disableALPN, "disable-alpn", disableALPN, "disable ALPN negotiation")
 
 	loggingOptions.AttachCobraFlags(rootCmd)
 

@@ -18,8 +18,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/nmnellis/istio-echo/common"
 	"istio.io/istio/pkg/config/protocol"
+	"github.com/nmnellis/istio-echo/common"
 )
 
 // IsServerReadyFunc is a function that indicates whether the server is currently ready to handle traffic.
@@ -30,7 +30,6 @@ type OnReadyFunc func()
 
 // Config for a single endpoint Instance.
 type Config struct {
-	Name          string
 	IsServerReady IsServerReadyFunc
 	Version       string
 	Cluster       string
@@ -41,6 +40,7 @@ type Config struct {
 	Port          *common.Port
 	ListenerIP    string
 	IstioVersion  string
+	DisableALPN   bool
 }
 
 // Instance of an endpoint that serves the Echo application on a single port/protocol.

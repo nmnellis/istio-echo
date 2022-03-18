@@ -26,10 +26,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"istio.io/istio/pkg/cmd"
+	// To install the xds resolvers and balancers.
+	_ "google.golang.org/grpc/xds"
+	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
+
 	"github.com/nmnellis/istio-echo/common"
 	"github.com/nmnellis/istio-echo/proto"
 	"github.com/nmnellis/istio-echo/server/forwarder"
+	"istio.io/istio/pkg/cmd"
 	"istio.io/pkg/log"
 )
 
@@ -40,6 +44,8 @@ var (
 	uds             string
 	headers         []string
 	msg             string
+	expect          string
+	expectSet       bool
 	method          string
 	http2           bool
 	http3           bool
@@ -66,6 +72,7 @@ where the network configuration doesn't support gRPC to the source pod.'
 		Args:              cobra.ExactArgs(1),
 		PersistentPreRunE: configureLogging,
 		Run: func(cmd *cobra.Command, args []string) {
+			expectSet = cmd.Flags().Changed("expect")
 			// Create a request from the flags.
 			request, err := getRequest(args[0])
 			if err != nil {
@@ -121,6 +128,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&caFile, "ca", "", "CA root cert file")
 	rootCmd.PersistentFlags().StringVar(&msg, "msg", "HelloWorld",
 		"message to send (for websockets)")
+	rootCmd.PersistentFlags().StringVar(&expect, "expect", "",
+		"message to expect (for tcp)")
 	rootCmd.PersistentFlags().StringVar(&method, "method", "", "method to use (for HTTP)")
 	rootCmd.PersistentFlags().BoolVar(&http2, "http2", false,
 		"send http requests as HTTP2 with prior knowledge")
@@ -165,6 +174,10 @@ func getRequest(url string) (*proto.ForwardEchoRequest, error) {
 		FollowRedirects: followRedirects,
 		Method:          method,
 		ServerName:      serverName,
+	}
+
+	if expectSet {
+		request.ExpectedResponse = &wrappers.StringValue{Value: expect}
 	}
 
 	if alpn != nil {

@@ -21,6 +21,8 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/google/uuid"
+
 	"github.com/nmnellis/istio-echo/common"
 	"github.com/nmnellis/istio-echo/common/response"
 	"istio.io/istio/pkg/test/util/retry"
@@ -88,7 +90,7 @@ func (s *tcpInstance) Start(onReady OnReadyFunc) error {
 	}()
 
 	// Notify the WaitGroup once the port has transitioned to ready.
-	go s.awaitReady(onReady, port)
+	go s.awaitReady(onReady, listener.Addr().String())
 
 	return nil
 }
@@ -105,6 +107,8 @@ func (s *tcpInstance) echo(conn net.Conn) {
 		_, _ = conn.Write([]byte(common.ServerFirstMagicString))
 	}
 
+	id := uuid.New()
+	epLog.WithLabels("remote", conn.RemoteAddr(), "id", id).Infof("TCP Request")
 	firstReply := true
 	buf := make([]byte, 4096)
 	for {
@@ -136,13 +140,14 @@ func (s *tcpInstance) echo(conn net.Conn) {
 			break
 		}
 	}
+
+	epLog.WithLabels("id", id).Infof("TCP Response")
 }
 
 func (s *tcpInstance) writeResponse(conn net.Conn) {
 	ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	// Write non-request fields specific to the instance
 	respFields := map[response.Field]string{
-		response.NameField:           s.Name,
 		response.StatusCodeField:     response.StatusCodeOK,
 		response.ClusterField:        s.Cluster,
 		response.IstioVersionField:   s.IstioVersion,
@@ -167,10 +172,8 @@ func (s *tcpInstance) Close() error {
 	return nil
 }
 
-func (s *tcpInstance) awaitReady(onReady OnReadyFunc, port int) {
+func (s *tcpInstance) awaitReady(onReady OnReadyFunc, address string) {
 	defer onReady()
-
-	address := fmt.Sprintf("127.0.0.1:%d", port)
 
 	err := retry.UntilSuccess(func() error {
 		conn, err := net.Dial("tcp", address)

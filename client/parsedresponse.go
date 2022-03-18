@@ -17,6 +17,7 @@ package client
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/nmnellis/istio-echo/common/response"
 	"github.com/nmnellis/istio-echo/proto"
 	"istio.io/istio/pkg/test/framework/components/cluster"
+	"istio.io/istio/pkg/util/istiomultierror"
 )
 
 var (
@@ -108,17 +110,17 @@ func (r ParsedResponses) Len() int {
 	return len(r)
 }
 
-func (r ParsedResponses) Check(check func(int, *ParsedResponse) error) (err error) {
+func (r ParsedResponses) Check(check func(int, *ParsedResponse) error) error {
 	if r.Len() == 0 {
 		return fmt.Errorf("no responses received")
 	}
-
+	err := istiomultierror.New()
 	for i, resp := range r {
 		if e := check(i, resp); e != nil {
 			err = multierror.Append(err, e)
 		}
 	}
-	return
+	return err.ErrorOrNil()
 }
 
 func (r ParsedResponses) CheckOrFail(t test.Failer, check func(int, *ParsedResponse) error) ParsedResponses {
@@ -272,7 +274,7 @@ func almostEquals(a, b, precision int) bool {
 func (r ParsedResponses) CheckKey(key, expected string) error {
 	return r.Check(func(i int, response *ParsedResponse) error {
 		if response.RawResponse[key] != expected {
-			return fmt.Errorf("response[%d] %s: expected %s, received %s", i, key, expected, response.RawResponse[key])
+			return fmt.Errorf("response[%d] %s: HTTP code %s, expected %s, received %s", i, key, response.Code, expected, response.RawResponse[key])
 		}
 		return nil
 	})
@@ -338,6 +340,26 @@ func (r ParsedResponses) String() string {
 		out += fmt.Sprintf("Response[%d]:\n%s", i, resp.String())
 	}
 	return out
+}
+
+// ResponseBody returns the body of the response, in order
+func (r *ParsedResponse) ResponseBody() []string {
+	type kv struct {
+		k, v string
+	}
+	kvs := []kv{}
+	// RawResponse is in random order, so get the order back via sorting.
+	for k, v := range r.RawResponse {
+		kvs = append(kvs, kv{k, v})
+	}
+	sort.Slice(kvs, func(i, j int) bool {
+		return kvs[i].k < kvs[j].k
+	})
+	resp := []string{}
+	for _, v := range kvs {
+		resp = append(resp, v.v)
+	}
+	return resp
 }
 
 func ParseForwardedResponse(req *proto.ForwardEchoRequest, resp *proto.ForwardEchoResponse) ParsedResponses {
